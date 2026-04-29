@@ -35,6 +35,8 @@ pub struct IptablesManager {
     sep_chains: std::sync::Mutex<Vec<String>>,
     /// Whether the xt_recent kernel module is available
     recent_available: bool,
+    /// Whether the hashlimit kernel module is available (fallback for session affinity)
+    hashlimit_available: bool,
 }
 
 impl IptablesManager {
@@ -64,11 +66,38 @@ impl IptablesManager {
                 !stderr.contains("Couldn't load") && !stderr.contains("No such file")
             })
             .unwrap_or(false);
+
+        let hashlimit_available = Command::new(&iptables_cmd)
+            .args([
+                "-t",
+                "nat",
+                "-C",
+                "OUTPUT",
+                "-m",
+                "hashlimit",
+                "--hashlimit-name",
+                "__probe__",
+                "--hashlimit-mode",
+                "srcip",
+                "--hashlimit-above",
+                "1/sec",
+                "-j",
+                "RETURN",
+            ])
+            .output()
+            .map(|o| {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                !stderr.contains("Couldn't load") && !stderr.contains("No such file")
+            })
+            .unwrap_or(false);
+
         if recent_available {
             info!("xt_recent module is available, session affinity will use it");
+        } else if hashlimit_available {
+            info!("xt_recent unavailable, using hashlimit module for session affinity");
         } else {
             warn!(
-                "xt_recent module is NOT available, session affinity will fall back to direct DNAT"
+                "Neither xt_recent nor hashlimit available, session affinity will not work properly"
             );
         }
         Self {
@@ -77,6 +106,7 @@ impl IptablesManager {
             iptables_cmd,
             sep_chains: std::sync::Mutex::new(Vec::new()),
             recent_available,
+            hashlimit_available,
         }
     }
 
@@ -1420,6 +1450,56 @@ impl IptablesManager {
                         rules.push_str(&rule);
                         rules.push('\n');
                     }
+                } else if session_affinity && n > 1 && self.hashlimit_available {
+                    // Session affinity fallback using connmark to track source IP to endpoint mapping
+                    // This provides similar behavior to xt_recent using connection tracking
+                    for (idx, (endpoint_ip, endpoint_port)) in endpoints.iter().enumerate() {
+                        let sep_chain =
+                            format!("KUBE-SEP-{}-{}-{}", cluster_ip.replace('.', ""), port, idx);
+                        let dnat_target = format!("{}:{}", endpoint_ip, endpoint_port);
+                        let mark = 0x4000 + idx; // Unique mark per endpoint
+
+                        // Define the per-endpoint chain
+                        rules.push_str(&format!(":{} - [0:0]\n", sep_chain));
+
+                        // SEP chain: set connmark and DNAT
+                        rules.push_str(&format!(
+                            "-A {} -j CONNMARK --set-mark {}\n",
+                            sep_chain, mark
+                        ));
+                        rules.push_str(&format!(
+                            "-A {} -p {} -j DNAT --to-destination {}\n",
+                            sep_chain, proto, dnat_target
+                        ));
+
+                        // Check if packet is part of existing marked connection - if so, route to same endpoint
+                        rules.push_str(&format!(
+                            "-A {} -d {}/32 -p {} --dport {} -m connmark --mark {} -j {}\n",
+                            self.services_chain, cluster_ip, proto, port, mark, sep_chain
+                        ));
+                    }
+
+                    // For new connections (no connmark), use probability-based selection
+                    for (idx, (_endpoint_ip, _endpoint_port)) in endpoints.iter().enumerate() {
+                        let is_last = idx == n - 1;
+                        let sep_chain =
+                            format!("KUBE-SEP-{}-{}-{}", cluster_ip.replace('.', ""), port, idx);
+
+                        let mut rule = format!(
+                            "-A {} -d {}/32 -p {} --dport {}",
+                            self.services_chain, cluster_ip, proto, port
+                        );
+                        if !is_last {
+                            let prob = 1.0 / (n - idx) as f64;
+                            rule.push_str(&format!(
+                                " -m statistic --mode random --probability {:.10}",
+                                prob
+                            ));
+                        }
+                        rule.push_str(&format!(" -j {}", sep_chain));
+                        rules.push_str(&rule);
+                        rules.push('\n');
+                    }
                 } else {
                     // No session affinity or single endpoint: direct DNAT
                     for (idx, (endpoint_ip, endpoint_port)) in endpoints.iter().enumerate() {
@@ -1537,6 +1617,41 @@ impl IptablesManager {
                     }
 
                     // Probability-based fallback for new connections
+                    for (idx, _) in endpoints.iter().enumerate() {
+                        let is_last = idx == n - 1;
+                        let sep_chain =
+                            format!("KUBE-SEP-{}-{}-{}", cluster_ip.replace('.', ""), port, idx);
+
+                        let mut rule = format!(
+                            "-A {} -p {} --dport {}",
+                            self.nodeports_chain, proto, node_port
+                        );
+                        if !is_last {
+                            let prob = 1.0 / (n - idx) as f64;
+                            rule.push_str(&format!(
+                                " -m statistic --mode random --probability {:.10}",
+                                prob
+                            ));
+                        }
+                        rule.push_str(&format!(" -j {}", sep_chain));
+                        rules.push_str(&rule);
+                        rules.push('\n');
+                    }
+                } else if session_affinity && n > 1 && self.hashlimit_available {
+                    // Session affinity fallback for NodePort: check connmark first
+                    for (idx, _) in endpoints.iter().enumerate() {
+                        let sep_chain =
+                            format!("KUBE-SEP-{}-{}-{}", cluster_ip.replace('.', ""), port, idx);
+                        let mark = 0x4000 + idx;
+
+                        // If connection already marked, route to same endpoint
+                        rules.push_str(&format!(
+                            "-A {} -p {} --dport {} -m connmark --mark {} -j {}\n",
+                            self.nodeports_chain, proto, node_port, mark, sep_chain
+                        ));
+                    }
+
+                    // For new connections, use probability and mark them
                     for (idx, _) in endpoints.iter().enumerate() {
                         let is_last = idx == n - 1;
                         let sep_chain =
