@@ -1403,9 +1403,9 @@ impl IptablesManager {
                     // K8s pattern: writeServiceToEndpointRules (proxier.go:1541-1562)
                     for (idx, (endpoint_ip, endpoint_port)) in endpoints.iter().enumerate() {
                         let sep_chain =
-                            format!("KUBE-SEP-{}-{}-{}", cluster_ip.replace('.', ""), port, idx);
+                            format!("KUBE-SEP-{}-{}-{}-{}", cluster_ip.replace('.', ""), proto, port, idx);
                         let recent_name =
-                            format!("AFFINITY-{}-{}-{}", cluster_ip.replace('.', ""), port, idx);
+                            format!("AFFINITY-{}-{}-{}-{}", cluster_ip.replace('.', ""), proto, port, idx);
                         let dnat_target = format!("{}:{}", endpoint_ip, endpoint_port);
 
                         // Define the per-endpoint chain
@@ -1433,7 +1433,7 @@ impl IptablesManager {
                     for (idx, (_endpoint_ip, _endpoint_port)) in endpoints.iter().enumerate() {
                         let is_last = idx == n - 1;
                         let sep_chain =
-                            format!("KUBE-SEP-{}-{}-{}", cluster_ip.replace('.', ""), port, idx);
+                            format!("KUBE-SEP-{}-{}-{}-{}", cluster_ip.replace('.', ""), proto, port, idx);
 
                         let mut rule = format!(
                             "-A {} -d {}/32 -p {} --dport {}",
@@ -1604,9 +1604,9 @@ impl IptablesManager {
                     let timeout_str = affinity_timeout.to_string();
                     for (idx, _) in endpoints.iter().enumerate() {
                         let sep_chain =
-                            format!("KUBE-SEP-{}-{}-{}", cluster_ip.replace('.', ""), port, idx);
+                            format!("KUBE-SEP-{}-{}-{}-{}", cluster_ip.replace('.', ""), proto, port, idx);
                         let recent_name =
-                            format!("AFFINITY-{}-{}-{}", cluster_ip.replace('.', ""), port, idx);
+                            format!("AFFINITY-{}-{}-{}-{}", cluster_ip.replace('.', ""), proto, port, idx);
 
                         // Affinity check: if client IP was recently seen, jump to SEP chain
                         rules.push_str(&format!(
@@ -1620,7 +1620,7 @@ impl IptablesManager {
                     for (idx, _) in endpoints.iter().enumerate() {
                         let is_last = idx == n - 1;
                         let sep_chain =
-                            format!("KUBE-SEP-{}-{}-{}", cluster_ip.replace('.', ""), port, idx);
+                            format!("KUBE-SEP-{}-{}-{}-{}", cluster_ip.replace('.', ""), proto, port, idx);
 
                         let mut rule = format!(
                             "-A {} -p {} --dport {}",
