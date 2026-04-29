@@ -336,10 +336,18 @@ impl<S: Storage + 'static> LoadBalancerController<S> {
                 .collect(),
         };
 
+        // Preserve existing conditions when updating LoadBalancer status
+        // This is required for the conformance test "should complete a service status lifecycle"
+        // which expects conditions to be maintained throughout the lifecycle
+        let existing_conditions = service
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.clone());
+
         // Update status
         service.status = Some(ServiceStatus {
             load_balancer: Some(service_lb_status),
-            conditions: None,
+            conditions: existing_conditions,
         });
 
         // Save updated service
